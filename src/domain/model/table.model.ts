@@ -1,4 +1,4 @@
-import { ISODateTime } from "./ISODateTime.js";
+import { ISODateTime } from "../types";
 
 export interface Table {
     id: string;

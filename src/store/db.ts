@@ -1,13 +1,15 @@
-import { Booking } from "../domain/model/booking.js";
-import { Restaurant } from "../domain/model/restaurant.js";
-import { Sector } from "../domain/model/sector.js";
-import { Table } from "../domain/model/table.js";
+import { Booking } from "../domain/model/booking.model.js";
+import { Restaurant } from "../domain/model/restaurant.model.js";
+import { Sector } from "../domain/model/sector.model.js";
+import { Table } from "../domain/model/table.model.js";
 
-export class MemoryStore {
+export class DB {
     restaurants = new Map<string, Restaurant>;
     sectors = new Map<string, Sector>;
     tables = new Map<string, Table>;
     bookings = new Map<string, Booking>;
+
+    idempotency = new Map<string, any>();
 
     saveBooking(b: Booking) {
         this.bookings.set(b.id, b);
@@ -18,11 +20,6 @@ export class MemoryStore {
         if (!b) return false;
 
         return this.bookings.delete(id);
-    }
-
-
-    private dayKey(tableId: string, isoStart: string) {
-        return `${tableId}:${isoStart.slice(0, 10)}`; // YYYY-MM-DD
     }
 
 }

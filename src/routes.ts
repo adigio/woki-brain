@@ -33,9 +33,9 @@ const routes = async (server: FastifyInstance) => {
             limit: request.query.limit
         };
 
-        const result = app.brain.discoverSeats(command);
+        const result = await app.brain.discoverSeats(command);
 
-        return { message: "Discover Woki devices - Not implemented yet" }
+        return result;
     })
 
     app.post("/bookings", {
@@ -44,7 +44,7 @@ const routes = async (server: FastifyInstance) => {
             body: z.object({
                 restaurantId: z.string(),
                 sectorId: z.string(),
-                partySize: z.number(),
+                partySize: z.number().positive(),
                 durationMinutes: z.number(),
                 date: z.string(),
                 windowStart: z.string().optional(),
@@ -53,6 +53,8 @@ const routes = async (server: FastifyInstance) => {
         }
     }, async (request, reply) => {
         app.log.info(`Executing POST for booking creation with restaurant ID ${request.body.restaurantId}`)
+
+        const idempotencyKey = request.headers["idempotency-key"] as string | undefined;
 
         const command: CreateBookingCommand = {
             restaurantId: request.body.restaurantId,
@@ -64,7 +66,7 @@ const routes = async (server: FastifyInstance) => {
             windowEnd: request.body.windowEnd
         };
 
-        const result = app.brain.createBooking(command);
+        const result = app.brain.createBooking(command, idempotencyKey);
 
         reply.code(201)
         return { message: "Create Woki booking - Not implemented yet" }
