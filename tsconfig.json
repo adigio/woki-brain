@@ -1,0 +1,17 @@
+{
+    "extends": "@tsconfig/node24/tsconfig.json",
+    "compilerOptions": {
+        "resolveJsonModule": true,
+        "allowJs": false,
+        "checkJs": false,
+        "outDir": "dist",
+        "sourceMap": true
+    },
+    "include": [
+        "resources/**/*",
+        "src/**/*",
+        "**/*.ts",
+        "**/*.tsx",
+        "**/*.js"
+    ]
+}
