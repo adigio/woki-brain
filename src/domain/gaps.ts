@@ -1,13 +1,11 @@
 import { logger } from "../index.js";
 import { DateTime } from "luxon";
+import { Table } from "./model/table.model.js";
+import { Booking } from "./model/booking.model.js";
 
-export interface Interval {
+ interface Interval {
     start: DateTime;
     end: DateTime;
-}
-
-export function sortIntervals(intervals: Interval[]): Interval[] {
-    return intervals.slice().sort((a, b) => a.start.toMillis() - b.start.toMillis());
 }
 
 export function computeGaps(
@@ -15,26 +13,49 @@ export function computeGaps(
     windowStart: DateTime,
     windowEnd: DateTime
 ): Interval[] {
-    const sorted = sortIntervals(bookings);
+    const sortedIntervals = sortIntervals(bookings);
     const gaps: Interval[] = [];
 
-    let prevEnd = windowStart;
+    let currentEnd = windowStart;
 
-    for (const b of sorted) {
-        if (b.start > prevEnd) {
-            gaps.push({ start: prevEnd, end: b.start });
+    for (const interval of sortedIntervals) {
+        if (interval.start > currentEnd) {
+            gaps.push({ start: currentEnd, end: interval.start });
         }
-        if (b.end > prevEnd) {
-            prevEnd = b.end;
+        if (interval.end > currentEnd) {
+            currentEnd = interval.end;
         }
     }
 
-    if (prevEnd < windowEnd) {
-        gaps.push({ start: prevEnd, end: windowEnd });
+    if (currentEnd < windowEnd) {
+        gaps.push({ start: currentEnd, end: windowEnd });
     }
 
     return gaps;
 }
+
+export function sortIntervals(intervals: Interval[]): Interval[] {
+    return intervals.slice().sort((a, b) => a.start.toMillis() - b.start.toMillis());
+}
+
+export const getComboGaps = (
+    combo: Table[],
+    bookings: Booking[],
+    window: { start: DateTime; end: DateTime }
+) => {
+    const gapList = combo.map(table => {
+        const tableBookings = bookings
+            .filter(b => b.tableIds.includes(table.id))
+            .map(b => ({
+                start: DateTime.fromISO(b.start),
+                end: DateTime.fromISO(b.end)
+            }));
+
+        return computeGaps(tableBookings, window.start, window.end);
+    });
+
+    return intersectMany(gapList);
+};
 
 export function intersectTwo(a: Interval[], b: Interval[]): Interval[] {
     const result: Interval[] = [];

@@ -1,4 +1,4 @@
-import { BusinessException } from "./BusinessException.js";
+import { BusinessException } from "./business.exception.js";
 
 export class NotFoundException extends BusinessException {
     constructor(detail?: string) {

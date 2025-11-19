@@ -1,8 +1,14 @@
 import { DB } from "../store/db.js";
 import { logger } from "../index.js";
 import { DateTime } from "luxon";
-import { computeGaps, findEarliestSlot, intersectMany } from "./gaps.js";
-import { NotFoundException } from "./exception/NotFoundException.js";
+import { computeGaps, findEarliestSlot, getComboGaps, intersectMany } from "./gaps.js";
+import { NotFoundException } from "./exception/not.found.exception.js";
+import { Window } from "./model/window.model.js";
+import { Table } from "./model/table.model.js";
+import { Booking } from "./model/booking.model.js";
+import { get } from "http";
+import { COMBO, SINGLE } from "../shared/constants.js";
+import { ErrorDescription } from "../shared/error.description.js";
 
 export interface DiscoverSeatsCommand {
     restaurantId: string;
@@ -41,85 +47,48 @@ export class WokiBrain {
     async discoverSeats(command: DiscoverSeatsCommand) {
         logger.info("Executing seat discovery in WokiBrain");
 
-        const { restaurantId, sectorId, partySize, duration } = command;
+        const { restaurantId, sectorId, partySize, duration, date } = command;
 
-        const restaurant = this.store.restaurants.get(restaurantId);
-        if (!restaurant) throw new NotFoundException("Restaurant not found");
+        const restaurant = this.store.getRestaurantById(restaurantId);
+        if (!restaurant) throw new NotFoundException(ErrorDescription.RESTAURANT_NOT_FOUND);
 
-        const sector = this.store.sectors.get(sectorId);
-        if (!sector) throw new NotFoundException("Sector not found");
+        const sector = this.store.getSectorById(sectorId);
+        if (!sector) throw new NotFoundException(ErrorDescription.SECTOR_NOT_FOUND);
 
-        const tz = restaurant.timezone;
+        const tables = this.store.findTablesBySectorId(sectorId);
+        if (tables.length === 0) throw new NotFoundException(ErrorDescription.NO_TABLES_FOUND);
 
-        const dateBase = DateTime.fromISO(command.date, { zone: tz });
-        const defaultWindows = restaurant.windows ?? [{ start: "00:00", end: "23:59" }];
+        const bookings = this.store.findBookingsByRestaurantAndSector(restaurantId, sectorId);
 
-        const requestedWindow = command.windowStart && command.windowEnd
-            ? [{ start: command.windowStart, end: command.windowEnd }]
-            : defaultWindows;
+        const window = buildWindowsForDate(
+            command.date,
+            restaurant.timezone,
+            restaurant.windows,
+            command.windowStart,
+            command.windowEnd
+        );
 
-        const windows = requestedWindow.map(window => ({
-            start: dateBase.set({
-                hour: parseInt(window.start.split(":")[0]),
-                minute: parseInt(window.start.split(":")[1]),
-                second: 0
-            }),
-            end: dateBase.set({
-                hour: parseInt(window.end.split(":")[0]),
-                minute: parseInt(window.end.split(":")[1]),
-                second: 0
-            })
-        }));
-
-        const window = windows[0];
-
-        const tables = Array.from(this.store.tables.values())
-            .filter(t => t.sectorId === sector.id);
-
-        const bookings = Array.from(this.store.bookings.values())
-            .filter(b =>
-                b.restaurantId === restaurantId &&
-                b.sectorId === sectorId &&
-                b.status === "CONFIRMED"
-            );
-
-        const candidates: any[] = [];
-
-        for (const table of tables) {
-            if (partySize < table.minSize || partySize > table.maxSize) continue;
-
-            const tableBookings = bookings
-                .filter(b => b.tableIds.includes(table.id))
-                .map(b => ({
-                    start: DateTime.fromISO(b.start),
-                    end: DateTime.fromISO(b.end)
-                }));
-
-            const gaps = computeGaps(tableBookings, window.start, window.end);
-
-            for (const g of gaps) {
-                const slot = findEarliestSlot(g, duration);
-                if (slot) {
-                    candidates.push({
-                        kind: "single",
-                        tableIds: [table.id],
-                        start: slot.start.toISO(),
-                        end: slot.end.toISO()
-                    });
-                }
-            }
-        }
+        const candidates: any[] = getSingleTableCandidates(
+            tables,
+            bookings,
+            window,
+            partySize,
+            duration
+        );
 
         const combos = generateAllCombos(tables);
 
         for (const combo of combos) {
 
-            const comboMin = combo.reduce((a, t) => a + t.minSize, 0);
-            const comboMax = combo.reduce((a, t) => a + t.maxSize, 0);
+            const { min: comboMin, max: comboMax } = computeComboCapacity(combo);
 
             if (partySize < comboMin || partySize > comboMax) continue;
 
+            const intersected = getComboGaps(combo, bookings, window);
+            if (intersected.length === 0) continue;
+
             const gapList = combo.map(table => {
+
                 const tableBookings = bookings
                     .filter(b => b.tableIds.includes(table.id))
                     .map(b => ({
@@ -130,14 +99,12 @@ export class WokiBrain {
                 return computeGaps(tableBookings, window.start, window.end);
             });
 
-            const intersected = intersectMany(gapList);
-            if (intersected.length === 0) continue;
+            for (const interval of intersected) {
+                const slot = findEarliestSlot(interval, duration);
 
-            for (const g of intersected) {
-                const slot = findEarliestSlot(g, duration);
                 if (slot) {
                     candidates.push({
-                        kind: "combo",
+                        kind: COMBO,
                         tableIds: combo.map(t => t.id),
                         start: slot.start.toISO(),
                         end: slot.end.toISO()
@@ -156,46 +123,15 @@ export class WokiBrain {
             return a.tableIds.join(",").localeCompare(b.tableIds.join(","));
         });
 
+        const limitedCandidates = command.limit ? sorted.slice(0, command.limit) : sorted;
 
-        const limited = command.limit ? sorted.slice(0, command.limit) : sorted;
-
-        return {
-            slotMinutes: 15,
-            duration,
-            candidates: limited,
-        };
+        logger.info(`Found ${limitedCandidates.length} seat candidates`);
+        return limitedCandidates;
     }
 
 
     async createBooking(command: CreateBookingCommand, idempotencyKey?: string) {
-        logger.info("Executing booking creation in WokiBrain");
-
-        if (idempotencyKey) {
-            const prev = this.store.idempotency.get(idempotencyKey);
-            if (prev) return prev;
-        }
-
-        const restaurant = this.store.restaurants.get(command.restaurantId);
-        if (!restaurant) throw new NotFoundException("Restaurant not found");
-
-        const sector = this.store.sectors.get(command.sectorId);
-        if (!sector) throw new NotFoundException("Sector not found");
-
-        const seat = this.findAvailableSeat(sector, command);
-        if (!seat)
-            throw new BusinessException(
-                409,
-                "no_availability",
-                "No seats available in selected time window"
-            );
-
-
-
         return null;
-    }
-
-    findAvailableSeat(sector: Sector, command: CreateBookingCommand) {
-        return sector.seats?.[0] ?? null;
     }
 
     async getBookingsByDate(query: BookingQuery) {
@@ -203,26 +139,112 @@ export class WokiBrain {
         return [];
     }
 
-    async deleteBooking(bookingId: string) {
+    async cancelBooking(bookingId: string) {
         logger.info(`Deleting booking with ID ${bookingId} in WokiBrain`);
         return false;
     }
 
 }
 
+export function buildWindowsForDate(
+    dateISO: string,
+    timezone: string,
+    windowsInput?: Window[],
+    overrideStart?: string,
+    overrideEnd?: string
+) {
+
+    const dateBase = DateTime.fromISO(dateISO, { zone: timezone });
+
+    const defaultWindows = windowsInput ?? [
+        { start: "00:00", end: "23:59" }
+    ];
+
+    const requestedWindows = overrideStart && overrideEnd
+        ? [{ start: overrideStart, end: overrideEnd }]
+        : defaultWindows;
 
 
-function generateAllCombos<T>(items: T[]): T[][] {
-    const result: T[][] = [];
-    const n = items.length;
+    const windows = requestedWindows.map(w => ({
+        start: dateBase.set({
+            hour: parseInt(w.start.split(":")[0]),
+            minute: parseInt(w.start.split(":")[1]),
+            second: 0
+        }),
+        end: dateBase.set({
+            hour: parseInt(w.end.split(":")[0]),
+            minute: parseInt(w.end.split(":")[1]),
+            second: 0
+        })
+    }));
 
-    for (let mask = 1; mask < 1 << n; mask++) {
-        const subset: T[] = [];
-        for (let i = 0; i < n; i++) {
-            if (mask & (1 << i)) subset.push(items[i]);
+    return windows[0];
+}
+
+const getSingleTableCandidates = (
+    tables: Table[],
+    bookings: Booking[],
+    window: { start: DateTime; end: DateTime },
+    partySize: number,
+    duration: number
+) => {
+
+    const candidates: any[] = [];
+
+    for (const table of tables) {
+        if (partySize < table.minSize || partySize > table.maxSize) continue;
+
+        const tableBookings = bookings
+            .filter(b => b.tableIds.includes(table.id))
+            .map(b => ({
+                start: DateTime.fromISO(b.start),
+                end: DateTime.fromISO(b.end)
+            }));
+
+        const gaps = computeGaps(tableBookings, window.start, window.end);
+
+        for (const gap of gaps) {
+            const slot = findEarliestSlot(gap, duration);
+            if (slot) {
+                candidates.push({
+                    kind: SINGLE,
+                    tableIds: [table.id],
+                    start: slot.start.toISO(),
+                    end: slot.end.toISO()
+                });
+            }
         }
-        if (subset.length >= 2) result.push(subset);
     }
 
-    return result;
+    return candidates;
 }
+
+const generateAllCombos = <T>(items: T[]): T[][] => {
+    const result: T[][] = []
+    backtrack(items, 0, [], result)
+    return result
+}
+
+const backtrack = <T>(
+    items: T[],
+    start: number,
+    path: T[],
+    result: T[][]
+) => {
+    if (path.length >= 2) result.push([...path])
+
+    for (let i = start; i < items.length; i++) {
+        path.push(items[i])
+        backtrack(items, i + 1, path, result)
+        path.pop()
+    }
+}
+
+const computeComboCapacity = (combo: Table[]) => {
+    const penalty = combo.length - 1;
+
+    const min = combo.reduce((sum, t) => sum + t.minSize, 0) - penalty;
+    const max = combo.reduce((sum, t) => sum + t.maxSize, 0) - penalty;
+
+    return { min, max };
+};
