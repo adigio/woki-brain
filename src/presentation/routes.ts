@@ -6,6 +6,8 @@ import { DiscoverRequest } from "./model/discover.request.model.js";
 import { BookingRequest } from "./model/booking.request.model.js";
 import { BookingDateRequest } from "./model/booking.date.request.model.js";
 import { DiscoverSeatsResponse } from "./model/discover.response.model.js";
+import { Booking } from "../domain/model/booking.model.js";
+import { BookingResponse } from "./model/booking.response.model.js";
 
 const routes = async (server: FastifyInstance) => {
     const app = server.withTypeProvider<ZodTypeProvider>();
@@ -28,7 +30,7 @@ const routes = async (server: FastifyInstance) => {
 
     app.post("/bookings", {
         schema: {
-            headers: z.object({ "idempotency-key": z.string().optional() }).loose(),
+            headers: z.object({ "idempotency-key": z.string() }),
             body: BookingRequest
         }
     }, async (request, reply) => {
@@ -36,11 +38,11 @@ const routes = async (server: FastifyInstance) => {
 
         const idempotencyKey = request.headers["idempotency-key"] as string | undefined;
 
-        const result = app.brain.createBooking(buildBookingCommand(request.body), idempotencyKey);
+        const bookingResult: Booking = await app.brain.createBooking(buildBookingCommand(request.body), idempotencyKey);
 
+        const response: BookingResponse = buildBookingResponse(bookingResult);
 
-        reply.code(201)
-        return { message: "Create Woki booking - Not implemented yet" }
+        reply.code(201).send(response);
     });
 
 
@@ -49,9 +51,14 @@ const routes = async (server: FastifyInstance) => {
     }, async (request, reply) => {
         app.log.info(`Executing GET bookings for restaurant with ID ${request.query.restaurantId} on date ${request.query.date}`)
 
-        const result = app.brain.getBookingsByDate(buildBookingQuery(request.query));
+        const result: Booking[] = await app.brain.getBookingsByDate(buildBookingQuery(request.query));
 
-        return { message: "Get Woki bookings - Not implemented yet" }
+        const response = {
+            date: request.query.date,
+            items: result.map(b => buildBookingResponse(b))
+        }
+
+        reply.code(200).send(response);
     })
 
     app.delete("/bookings/:id", {
@@ -61,9 +68,9 @@ const routes = async (server: FastifyInstance) => {
             })
         }
     }, async (request, reply) => {
-        app.log.info(`Executing DELETE booking with ID `)
+        app.log.info(`Executing DELETE booking with ID ${request.params.id}`)
 
-        const result = app.brain.cancelBooking(request.params.id);
+        await app.brain.cancelBooking(request.params.id);
 
         reply.code(204)
     })
@@ -99,6 +106,22 @@ const buildBookingQuery = (request: any): BookingQuery => {
         restaurantId: request.restaurantId,
         sectorId: request.sectorId,
         date: request.date
+    }
+}
+
+const buildBookingResponse = (booking: Booking): BookingResponse => {
+    return {
+        id: booking.id,
+        restaurantId: booking.restaurantId,
+        sectorId: booking.sectorId,
+        tableIds: booking.tableIds,
+        partySize: booking.partySize,
+        start: booking.start,
+        end: booking.end,
+        durationMinutes: booking.durationMinutes,
+        status: booking.status,
+        createdAt: booking.createdAt,
+        updatedAt: booking.updatedAt
     }
 }
 

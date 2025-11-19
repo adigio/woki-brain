@@ -6,9 +6,11 @@ import { NotFoundException } from "./exception/not.found.exception.js";
 import { Window } from "./model/window.model.js";
 import { Table } from "./model/table.model.js";
 import { Booking } from "./model/booking.model.js";
-import { get } from "http";
 import { COMBO, SINGLE } from "../shared/constants.js";
-import { ErrorDescription } from "../shared/error.description.js";
+import { ErrorDescriptions } from "../shared/error.descriptions.js";
+import { BadRequestException } from "./exception/bad.request.exception.js";
+import { ConflictException } from "./exception/conflict.exception.js";
+import { ErrorMessages } from "../shared/error.messages.js";
 
 export interface DiscoverSeatsCommand {
     restaurantId: string;
@@ -50,13 +52,13 @@ export class WokiBrain {
         const { restaurantId, sectorId, partySize, duration, date } = command;
 
         const restaurant = this.store.getRestaurantById(restaurantId);
-        if (!restaurant) throw new NotFoundException(ErrorDescription.RESTAURANT_NOT_FOUND);
+        if (!restaurant) throw new NotFoundException(ErrorDescriptions.RESTAURANT_NOT_FOUND);
 
         const sector = this.store.getSectorById(sectorId);
-        if (!sector) throw new NotFoundException(ErrorDescription.SECTOR_NOT_FOUND);
+        if (!sector) throw new NotFoundException(ErrorDescriptions.SECTOR_NOT_FOUND);
 
         const tables = this.store.findTablesBySectorId(sectorId);
-        if (tables.length === 0) throw new NotFoundException(ErrorDescription.NO_TABLES_FOUND);
+        if (tables.length === 0) throw new NotFoundException(ErrorDescriptions.NO_TABLES_FOUND);
 
         const bookings = this.store.findBookingsByRestaurantAndSector(restaurantId, sectorId);
 
@@ -129,19 +131,122 @@ export class WokiBrain {
         return limitedCandidates;
     }
 
-
     async createBooking(command: CreateBookingCommand, idempotencyKey?: string) {
-        return null;
+        logger.info("Executing booking creation in WokiBrain");
+
+        if (!idempotencyKey) throw new BadRequestException(ErrorDescriptions.IDEMPOTENCY_KEY_MISSING);
+
+        const existing = this.store.getIdempotency(idempotencyKey);
+        if (existing) return existing.response;
+
+        const {
+            restaurantId,
+            sectorId,
+            partySize,
+            durationMinutes,
+            date,
+            windowStart,
+            windowEnd
+        } = command;
+
+        const candidates = await this.discoverSeats({
+            restaurantId,
+            sectorId,
+            partySize,
+            duration: durationMinutes,
+            date,
+            windowStart,
+            windowEnd,
+            limit: 1
+        });
+
+        if (!candidates.length) {
+            throw new ConflictException(ErrorMessages.NO_CAPACITY, ErrorDescriptions.NO_CAPACITY_AVAILABLE);
+        }
+
+        const candidate = candidates[0];
+
+        const lockKey = generateLockKey(restaurantId, sectorId, candidate);
+        this.store.tryGetLock(lockKey);
+
+        try {
+            const existingBookings = this.store.findBookingsByRestaurantAndSector(restaurantId, sectorId);
+
+            for (const booking of existingBookings) {
+                if (booking.status !== "CONFIRMED") continue;
+
+                const overlaps =
+                    booking.tableIds.some(id => candidate.tableIds.includes(id)) &&
+                    !(DateTime.fromISO(candidate.end) <= DateTime.fromISO(booking.start) ||
+                        DateTime.fromISO(candidate.start) >= DateTime.fromISO(booking.end));
+
+                if (overlaps) {
+                    throw new ConflictException(ErrorMessages.NO_CAPACITY, ErrorDescriptions.SLOT_TAKEN);
+                }
+            }
+
+            const id = this.store.generateBookingId();
+            const now = DateTime.now().toISO();
+
+            const savedBooking: Booking = {
+                id,
+                restaurantId,
+                sectorId,
+                tableIds: candidate.tableIds,
+                partySize,
+                start: candidate.start,
+                end: candidate.end,
+                durationMinutes,
+                status: "CONFIRMED",
+                createdAt: now,
+                updatedAt: now
+            };
+
+            this.store.saveBooking(savedBooking);
+
+            this.store.saveIdempotency(idempotencyKey, {
+                response: savedBooking,
+                expiresAt: DateTime.now().plus({ seconds: 60 }).toMillis()
+            });
+
+            return savedBooking;
+
+        } finally {
+            this.store.releaseLock(lockKey);
+        }
     }
 
-    async getBookingsByDate(query: BookingQuery) {
+    async getBookingsByDate(query: BookingQuery): Promise<Booking[]> {
         logger.info("Fetching bookings by date in WokiBrain");
-        return [];
+
+        const { restaurantId, sectorId, date } = query;
+
+        const restaurant = this.store.getRestaurantById(restaurantId);
+        if (!restaurant) throw new NotFoundException(ErrorDescriptions.RESTAURANT_NOT_FOUND);
+
+        const sector = this.store.getSectorById(sectorId);
+        if (!sector) throw new NotFoundException(ErrorDescriptions.SECTOR_NOT_FOUND);
+
+        const savedBookings: Booking[] = await this.store.findBookingsByRestaurantIdAndSectorIdAndDate(restaurantId, sectorId, date);
+
+        return savedBookings;
     }
 
     async cancelBooking(bookingId: string) {
-        logger.info(`Deleting booking with ID ${bookingId} in WokiBrain`);
-        return false;
+        logger.info(`Cancelling booking with ID ${bookingId} in WokiBrain`);
+
+        const booking = this.store.bookings.get(bookingId);
+        if (!booking) {
+            throw new NotFoundException(ErrorDescriptions.BOOKING_NOT_FOUND);
+        }
+
+        if (booking.status === "CANCELLED") {
+            return booking;
+        }
+
+        this.store.cancelBooking(booking);
+
+        return booking;
     }
 
 }
@@ -248,3 +353,7 @@ const computeComboCapacity = (combo: Table[]) => {
 
     return { min, max };
 };
+
+const generateLockKey = (restaurantId: string, sectorId: string, candidateToBooking: any) => {
+    return `${restaurantId}|${sectorId}|${candidateToBooking.tableIds.sort().join("+")}|${candidateToBooking.start}`;
+}

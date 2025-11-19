@@ -35,7 +35,8 @@ app.setSerializerCompiler(serializerCompiler);
 app.decorate("store", store);
 app.decorate("brain", wokiBrain);
 
-app.register(preloadData);
+await preloadData(app);
+
 app.register(routes, { prefix: "/woki" });
 
 app.setErrorHandler((err, request, reply) => {
