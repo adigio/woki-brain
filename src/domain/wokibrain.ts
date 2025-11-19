@@ -1,0 +1,359 @@
+import { DB } from "../infrastructure/store/db.js";
+import { logger } from "../index.js";
+import { DateTime } from "luxon";
+import { computeGaps, findEarliestSlot, getComboGaps, intersectMany } from "./gaps.js";
+import { NotFoundException } from "./exception/not.found.exception.js";
+import { Window } from "./model/window.model.js";
+import { Table } from "./model/table.model.js";
+import { Booking } from "./model/booking.model.js";
+import { COMBO, SINGLE } from "../shared/constants.js";
+import { ErrorDescriptions } from "../shared/error.descriptions.js";
+import { BadRequestException } from "./exception/bad.request.exception.js";
+import { ConflictException } from "./exception/conflict.exception.js";
+import { ErrorMessages } from "../shared/error.messages.js";
+
+export interface DiscoverSeatsCommand {
+    restaurantId: string;
+    sectorId: string;
+    partySize: number;
+    duration: number;
+    date: string;
+    windowStart?: string;
+    windowEnd?: string;
+    limit?: number;
+}
+
+export interface CreateBookingCommand {
+    restaurantId: string;
+    sectorId: string;
+    partySize: number;
+    durationMinutes: number;
+    date: string;
+    windowStart?: string;
+    windowEnd?: string;
+}
+
+export interface BookingQuery {
+    restaurantId: string;
+    sectorId: string;
+    date: string;
+}
+
+export class WokiBrain {
+    private store: DB;
+
+    constructor(store: DB) {
+        this.store = store;
+    }
+
+    async discoverSeats(command: DiscoverSeatsCommand) {
+        logger.info("Executing seat discovery in WokiBrain");
+
+        const { restaurantId, sectorId, partySize, duration, date } = command;
+
+        const restaurant = this.store.getRestaurantById(restaurantId);
+        if (!restaurant) throw new NotFoundException(ErrorDescriptions.RESTAURANT_NOT_FOUND);
+
+        const sector = this.store.getSectorById(sectorId);
+        if (!sector) throw new NotFoundException(ErrorDescriptions.SECTOR_NOT_FOUND);
+
+        const tables = this.store.findTablesBySectorId(sectorId);
+        if (tables.length === 0) throw new NotFoundException(ErrorDescriptions.NO_TABLES_FOUND);
+
+        const bookings = this.store.findBookingsByRestaurantAndSector(restaurantId, sectorId);
+
+        const window = buildWindowsForDate(
+            command.date,
+            restaurant.timezone,
+            restaurant.windows,
+            command.windowStart,
+            command.windowEnd
+        );
+
+        const candidates: any[] = getSingleTableCandidates(
+            tables,
+            bookings,
+            window,
+            partySize,
+            duration
+        );
+
+        const combos = generateAllCombos(tables);
+
+        for (const combo of combos) {
+
+            const { min: comboMin, max: comboMax } = computeComboCapacity(combo);
+
+            if (partySize < comboMin || partySize > comboMax) continue;
+
+            const intersected = getComboGaps(combo, bookings, window);
+            if (intersected.length === 0) continue;
+
+            const gapList = combo.map(table => {
+
+                const tableBookings = bookings
+                    .filter(b => b.tableIds.includes(table.id))
+                    .map(b => ({
+                        start: DateTime.fromISO(b.start),
+                        end: DateTime.fromISO(b.end)
+                    }));
+
+                return computeGaps(tableBookings, window.start, window.end);
+            });
+
+            for (const interval of intersected) {
+                const slot = findEarliestSlot(interval, duration);
+
+                if (slot) {
+                    candidates.push({
+                        kind: COMBO,
+                        tableIds: combo.map(t => t.id),
+                        start: slot.start.toISO(),
+                        end: slot.end.toISO()
+                    });
+                }
+            }
+        }
+
+        const sorted = candidates.sort((a, b) => {
+            if (a.start < b.start) return -1;
+            if (a.start > b.start) return 1;
+
+            if (a.tableIds.length < b.tableIds.length) return -1;
+            if (a.tableIds.length > b.tableIds.length) return 1;
+
+            return a.tableIds.join(",").localeCompare(b.tableIds.join(","));
+        });
+
+        const limitedCandidates = command.limit ? sorted.slice(0, command.limit) : sorted;
+
+        logger.info(`Found ${limitedCandidates.length} seat candidates`);
+        return limitedCandidates;
+    }
+
+    async createBooking(command: CreateBookingCommand, idempotencyKey?: string) {
+        logger.info("Executing booking creation in WokiBrain");
+
+        if (!idempotencyKey) throw new BadRequestException(ErrorDescriptions.IDEMPOTENCY_KEY_MISSING);
+
+        const existing = this.store.getIdempotency(idempotencyKey);
+        if (existing) return existing.response;
+
+        const {
+            restaurantId,
+            sectorId,
+            partySize,
+            durationMinutes,
+            date,
+            windowStart,
+            windowEnd
+        } = command;
+
+        const candidates = await this.discoverSeats({
+            restaurantId,
+            sectorId,
+            partySize,
+            duration: durationMinutes,
+            date,
+            windowStart,
+            windowEnd,
+            limit: 1
+        });
+
+        if (!candidates.length) {
+            throw new ConflictException(ErrorMessages.NO_CAPACITY, ErrorDescriptions.NO_CAPACITY_AVAILABLE);
+        }
+
+        const candidate = candidates[0];
+
+        const lockKey = generateLockKey(restaurantId, sectorId, candidate);
+        this.store.tryGetLock(lockKey);
+
+        try {
+            const existingBookings = this.store.findBookingsByRestaurantAndSector(restaurantId, sectorId);
+
+            for (const booking of existingBookings) {
+                if (booking.status !== "CONFIRMED") continue;
+
+                const overlaps =
+                    booking.tableIds.some((id: string) => candidate.tableIds.includes(id)) &&
+                    !(DateTime.fromISO(candidate.end) <= DateTime.fromISO(booking.start) ||
+                        DateTime.fromISO(candidate.start) >= DateTime.fromISO(booking.end));
+
+                if (overlaps) {
+                    throw new ConflictException(ErrorMessages.NO_CAPACITY, ErrorDescriptions.SLOT_TAKEN);
+                }
+            }
+
+            const id = this.store.generateBookingId();
+            const now = DateTime.now().toISO();
+
+            const savedBooking: Booking = {
+                id,
+                restaurantId,
+                sectorId,
+                tableIds: candidate.tableIds,
+                partySize,
+                start: candidate.start,
+                end: candidate.end,
+                durationMinutes,
+                status: "CONFIRMED",
+                createdAt: now,
+                updatedAt: now
+            };
+
+            this.store.saveBooking(savedBooking);
+
+            this.store.saveIdempotency(idempotencyKey, {
+                response: savedBooking,
+                expiresAt: DateTime.now().plus({ seconds: 60 }).toMillis()
+            });
+
+            return savedBooking;
+
+        } finally {
+            this.store.releaseLock(lockKey);
+        }
+    }
+
+    async getBookingsByDate(query: BookingQuery): Promise<Booking[]> {
+        logger.info("Fetching bookings by date in WokiBrain");
+
+        const { restaurantId, sectorId, date } = query;
+
+        const restaurant = this.store.getRestaurantById(restaurantId);
+        if (!restaurant) throw new NotFoundException(ErrorDescriptions.RESTAURANT_NOT_FOUND);
+
+        const sector = this.store.getSectorById(sectorId);
+        if (!sector) throw new NotFoundException(ErrorDescriptions.SECTOR_NOT_FOUND);
+
+        const savedBookings: Booking[] = await this.store.findBookingsByRestaurantIdAndSectorIdAndDate(restaurantId, sectorId, date);
+
+        return savedBookings;
+    }
+
+    async cancelBooking(bookingId: string) {
+        logger.info(`Cancelling booking with ID ${bookingId} in WokiBrain`);
+
+        const booking = this.store.bookings.get(bookingId);
+        if (!booking) {
+            throw new NotFoundException(ErrorDescriptions.BOOKING_NOT_FOUND);
+        }
+
+        if (booking.status === "CANCELLED") {
+            return booking;
+        }
+
+        this.store.cancelBooking(booking);
+
+        return booking;
+    }
+
+}
+
+export function buildWindowsForDate(
+    dateISO: string,
+    timezone: string,
+    windowsInput?: Window[],
+    overrideStart?: string,
+    overrideEnd?: string
+) {
+
+    const dateBase = DateTime.fromISO(dateISO, { zone: timezone });
+
+    const defaultWindows = windowsInput ?? [
+        { start: "00:00", end: "23:59" }
+    ];
+
+    const requestedWindows = overrideStart && overrideEnd
+        ? [{ start: overrideStart, end: overrideEnd }]
+        : defaultWindows;
+
+
+    const windows = requestedWindows.map(w => ({
+        start: dateBase.set({
+            hour: parseInt(w.start.split(":")[0]),
+            minute: parseInt(w.start.split(":")[1]),
+            second: 0
+        }),
+        end: dateBase.set({
+            hour: parseInt(w.end.split(":")[0]),
+            minute: parseInt(w.end.split(":")[1]),
+            second: 0
+        })
+    }));
+
+    return windows[0];
+}
+
+const getSingleTableCandidates = (
+    tables: Table[],
+    bookings: Booking[],
+    window: { start: DateTime; end: DateTime },
+    partySize: number,
+    duration: number
+) => {
+
+    const candidates: any[] = [];
+
+    for (const table of tables) {
+        if (partySize < table.minSize || partySize > table.maxSize) continue;
+
+        const tableBookings = bookings
+            .filter(b => b.tableIds.includes(table.id))
+            .map(b => ({
+                start: DateTime.fromISO(b.start),
+                end: DateTime.fromISO(b.end)
+            }));
+
+        const gaps = computeGaps(tableBookings, window.start, window.end);
+
+        for (const gap of gaps) {
+            const slot = findEarliestSlot(gap, duration);
+            if (slot) {
+                candidates.push({
+                    kind: SINGLE,
+                    tableIds: [table.id],
+                    start: slot.start.toISO(),
+                    end: slot.end.toISO()
+                });
+            }
+        }
+    }
+
+    return candidates;
+}
+
+const generateAllCombos = <T>(items: T[]): T[][] => {
+    const result: T[][] = []
+    backtrack(items, 0, [], result)
+    return result
+}
+
+const backtrack = <T>(
+    items: T[],
+    start: number,
+    path: T[],
+    result: T[][]
+) => {
+    if (path.length >= 2) result.push([...path])
+
+    for (let i = start; i < items.length; i++) {
+        path.push(items[i])
+        backtrack(items, i + 1, path, result)
+        path.pop()
+    }
+}
+
+const computeComboCapacity = (combo: Table[]) => {
+    const penalty = combo.length - 1;
+
+    const min = combo.reduce((sum, t) => sum + t.minSize, 0) - penalty;
+    const max = combo.reduce((sum, t) => sum + t.maxSize, 0) - penalty;
+
+    return { min, max };
+};
+
+const generateLockKey = (restaurantId: string, sectorId: string, candidateToBooking: any) => {
+    return `${restaurantId}|${sectorId}|${candidateToBooking.tableIds.sort().join("+")}|${candidateToBooking.start}`;
+}
