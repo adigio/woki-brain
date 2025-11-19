@@ -1,6 +1,4 @@
-import { ISODateTime } from "./ISODateTime.js";
-
-type BookingStatus = "CONFIRMED" | "CANCELLED";
+import { BookingStatus, ISODateTime } from "../types/index.js";
 
 export interface Booking {
     id: string;
