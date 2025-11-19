@@ -1,4 +1,4 @@
-import { DB } from "../store/db.js";
+import { DB } from "../infrastructure/store/db.js";
 import { logger } from "../index.js";
 import { DateTime } from "luxon";
 import { computeGaps, findEarliestSlot, getComboGaps, intersectMany } from "./gaps.js";
@@ -176,7 +176,7 @@ export class WokiBrain {
                 if (booking.status !== "CONFIRMED") continue;
 
                 const overlaps =
-                    booking.tableIds.some(id => candidate.tableIds.includes(id)) &&
+                    booking.tableIds.some((id: string) => candidate.tableIds.includes(id)) &&
                     !(DateTime.fromISO(candidate.end) <= DateTime.fromISO(booking.start) ||
                         DateTime.fromISO(candidate.start) >= DateTime.fromISO(booking.end));
 

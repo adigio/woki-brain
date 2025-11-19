@@ -1,10 +1,10 @@
 import fastify from "fastify";
 import { serializerCompiler, validatorCompiler } from "fastify-type-provider-zod";
-import { DB } from "./store/db.js";
+import { DB } from "./infrastructure/store/db.js";
 import { WokiBrain } from "./domain/wokibrain.js";
 import routes from "./presentation/routes.js";
 
-import preloadData from "./store/preload.js";
+import preloadData from "./infrastructure/store/preload.js";
 import { BusinessException } from "./domain/exception/business.exception.js";
 
 declare module 'fastify' {

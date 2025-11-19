@@ -1,8 +1,8 @@
 import { DateTime } from "luxon";
-import { Booking } from "../domain/model/booking.model.js";
-import { Restaurant } from "../domain/model/restaurant.model.js";
-import { Sector } from "../domain/model/sector.model.js";
-import { Table } from "../domain/model/table.model.js";
+import { Booking } from "../../domain/model/booking.model.js";
+import { Restaurant } from "../../domain/model/restaurant.model.js";
+import { Sector } from "../../domain/model/sector.model.js";
+import { Table } from "../../domain/model/table.model.js";
 
 export class DB {
     restaurants = new Map<string, Restaurant>;
