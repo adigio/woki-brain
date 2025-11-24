@@ -1,7 +1,7 @@
-import { logger } from "../index.js";
+import { logger } from "../../src";
 import { DateTime } from "luxon";
-import { Table } from "./model/table.model.js";
-import { Booking } from "./model/booking.model.js";
+import { Table } from "./model/table.model";
+import { Booking } from "./model/booking.model";
 
  interface Interval {
     start: DateTime;

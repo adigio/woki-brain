@@ -1,7 +1,7 @@
 import { FastifyInstance } from "fastify";
 import fs from "fs";
-import { Booking } from "../../domain/model/booking.model.js";
-import { Table } from "../../domain/model/table.model.js";
+import { Booking } from "../../domain/model/booking.model";
+import { Table } from "../../domain/model/table.model";
 
 const preloadData = async (app: FastifyInstance) => {
     const jsonPath = new URL("../../resources/seed.json", import.meta.url);

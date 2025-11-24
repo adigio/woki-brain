@@ -1,4 +1,4 @@
-import { BusinessException } from "./business.exception.js";
+import { BusinessException } from "./business.exception";
 
 export class BadRequestException extends BusinessException {
     constructor(detail?: string) {

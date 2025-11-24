@@ -1,13 +1,13 @@
 import { FastifyInstance } from "fastify"
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod"
-import { BookingQuery, CreateBookingCommand, DiscoverSeatsCommand } from "../domain/wokibrain.js";
-import { DiscoverRequest } from "./model/discover.request.model.js";
-import { BookingRequest } from "./model/booking.request.model.js";
-import { BookingDateRequest } from "./model/booking.date.request.model.js";
-import { DiscoverSeatsResponse } from "./model/discover.response.model.js";
-import { Booking } from "../domain/model/booking.model.js";
-import { BookingResponse } from "./model/booking.response.model.js";
+import { BookingQuery, CreateBookingCommand, DiscoverSeatsCommand } from "../domain/wokibrain";
+import { DiscoverRequest } from "./model/discover.request.model";
+import { BookingRequest } from "./model/booking.request.model";
+import { BookingDateRequest } from "./model/booking.date.request.model";
+import { DiscoverSeatsResponse } from "./model/discover.response.model";
+import { Booking } from "../domain/model/booking.model";
+import { BookingResponse } from "./model/booking.response.model";
 
 const routes = async (server: FastifyInstance) => {
     const app = server.withTypeProvider<ZodTypeProvider>();

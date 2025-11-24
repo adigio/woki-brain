@@ -1,16 +1,16 @@
-import { DB } from "../infrastructure/store/db.js";
-import { logger } from "../index.js";
+import { DB } from "../infrastructure/store/db";
+import { logger } from "../../src";
 import { DateTime } from "luxon";
-import { computeGaps, findEarliestSlot, getComboGaps, intersectMany } from "./gaps.js";
-import { NotFoundException } from "./exception/not.found.exception.js";
-import { Window } from "./model/window.model.js";
-import { Table } from "./model/table.model.js";
-import { Booking } from "./model/booking.model.js";
-import { COMBO, SINGLE } from "../shared/constants.js";
-import { ErrorDescriptions } from "../shared/error.descriptions.js";
-import { BadRequestException } from "./exception/bad.request.exception.js";
-import { ConflictException } from "./exception/conflict.exception.js";
-import { ErrorMessages } from "../shared/error.messages.js";
+import { computeGaps, findEarliestSlot, getComboGaps, intersectMany } from "./gaps";
+import { NotFoundException } from "./exception/not.found.exception";
+import { Window } from "./model/window.model";
+import { Table } from "./model/table.model";
+import { Booking } from "./model/booking.model";
+import { COMBO, SINGLE } from "../shared/constants";
+import { ErrorDescriptions } from "../shared/error.descriptions";
+import { BadRequestException } from "./exception/bad.request.exception";
+import { ConflictException } from "./exception/conflict.exception";
+import { ErrorMessages } from "../shared/error.messages";
 
 export interface DiscoverSeatsCommand {
     restaurantId: string;

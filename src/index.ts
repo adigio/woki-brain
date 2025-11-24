@@ -1,21 +1,7 @@
 import fastify from "fastify";
-import { serializerCompiler, validatorCompiler } from "fastify-type-provider-zod";
-import { DB } from "./infrastructure/store/db.js";
-import { WokiBrain } from "./domain/wokibrain.js";
-import routes from "./presentation/routes.js";
-
-import preloadData from "./infrastructure/store/preload.js";
-import { BusinessException } from "./domain/exception/business.exception.js";
-
-declare module 'fastify' {
-    interface FastifyInstance {
-        store: DB;
-        brain: WokiBrain;
-    }
-}
-
-const store = new DB();
-const wokiBrain = new WokiBrain(store);
+import {serializerCompiler, validatorCompiler} from "fastify-type-provider-zod";
+import preloadData from "../old/infrastructure/store/preload.js";
+import {BusinessException} from "../old/domain/exception/business.exception";
 
 const app = fastify({
     logger: {
@@ -32,12 +18,7 @@ const app = fastify({
 app.setValidatorCompiler(validatorCompiler);
 app.setSerializerCompiler(serializerCompiler);
 
-app.decorate("store", store);
-app.decorate("brain", wokiBrain);
-
 await preloadData(app);
-
-app.register(routes, { prefix: "/woki" });
 
 app.setErrorHandler((err, request, reply) => {
     const error = err as Error;

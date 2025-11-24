@@ -1,4 +1,4 @@
-import { BookingStatus, ISODateTime } from "../types/index.js";
+import { BookingStatus, ISODateTime } from "../types";
 
 export interface Booking {
     id: string;
